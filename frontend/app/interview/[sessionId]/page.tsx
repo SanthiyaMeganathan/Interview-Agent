@@ -6,13 +6,17 @@ import {
   RoomAudioRenderer,
   StartAudio,
   TrackToggle,
+  useIsSpeaking,
   useRoomContext,
+  useTrackTranscription,
+  useTracks,
   useVoiceAssistant,
 } from '@livekit/components-react';
 import '@livekit/components-styles';
 import { Track } from 'livekit-client';
 import Link from 'next/link';
-import { Suspense, use, useEffect, useState } from 'react';
+import { Volume2 } from 'lucide-react';
+import { Suspense, use, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 
 type TokenResponse = {
@@ -23,16 +27,18 @@ type TokenResponse = {
 type SessionStatus = {
   startedAt: number | null;
   elapsedSeconds: number;
-  minimumDurationSeconds: number;
+  maximumDurationSeconds: number;
   sampledAt: number;
 };
+
+const INTERVIEW_EXIT_CONFIRMATION = 'the interview is over. thank you for your time.';
 
 export default function InterviewRoom({ params }: { params: Promise<{ sessionId: string }> }) {
   return (
     <Suspense
       fallback={
-        <div className="flex min-h-screen items-center justify-center bg-slate-900 text-white">
-          Connecting to Interview Agent...
+        <div className="flex min-h-screen items-center justify-center bg-slate-50 text-slate-700">
+          Connecting with interviewer…
         </div>
       }
     >
@@ -65,7 +71,7 @@ function InterviewRoomContent({ params }: { params: Promise<{ sessionId: string 
             'error' in result &&
             typeof result.error === 'string'
               ? result.error
-              : 'Unable to get an interview room token.';
+              : 'Unable to connect with the interviewer.';
           throw new Error(message);
         }
 
@@ -76,13 +82,13 @@ function InterviewRoomContent({ params }: { params: Promise<{ sessionId: string 
           typeof data.serverUrl !== 'string' ||
           !data.serverUrl
         ) {
-          throw new Error('The interview room response was incomplete.');
+          throw new Error('Unable to connect with the interviewer.');
         }
         setToken(data.token);
         setServerUrl(data.serverUrl);
-      } catch (cause) {
+      } catch {
         if (!controller.signal.aborted) {
-          setError(cause instanceof Error ? cause.message : 'Unable to connect to the interview room.');
+          setError('Unable to connect with the interviewer.');
         }
       }
     }
@@ -93,8 +99,8 @@ function InterviewRoomContent({ params }: { params: Promise<{ sessionId: string 
 
   if (error) {
     return (
-      <div className="flex min-h-screen flex-col items-center justify-center gap-5 bg-slate-900 p-8 text-center">
-        <p role="alert" className="text-red-300">{error}</p>
+      <div className="flex min-h-screen flex-col items-center justify-center gap-5 bg-slate-50 p-8 text-center">
+        <p role="alert" className="text-lg font-medium text-slate-700">{error}</p>
         <Link href="/" className="rounded-lg bg-indigo-600 px-4 py-2 font-medium text-white hover:bg-indigo-500">
           Return to home
         </Link>
@@ -104,16 +110,19 @@ function InterviewRoomContent({ params }: { params: Promise<{ sessionId: string 
 
   if (roomError) {
     return (
-      <div role="alert" className="flex min-h-screen items-center justify-center bg-slate-900 p-8 text-center text-red-300">
-        LiveKit connection failed: {roomError}
+      <div className="flex min-h-screen flex-col items-center justify-center gap-5 bg-slate-50 p-8 text-center">
+        <p role="alert" className="text-lg font-medium text-slate-700">Unable to connect with the interviewer.</p>
+        <Link href="/" className="rounded-lg bg-indigo-600 px-4 py-2 font-medium text-white hover:bg-indigo-700">
+          Return to home
+        </Link>
       </div>
     );
   }
 
   if (!token) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-slate-900 text-white">
-        Connecting to Interview Agent...
+      <div className="flex min-h-screen items-center justify-center bg-slate-50 text-slate-700">
+      Connecting with interviewer…
       </div>
     );
   }
@@ -124,8 +133,8 @@ function InterviewRoomContent({ params }: { params: Promise<{ sessionId: string 
       token={token}
       connect
       audio
-      onError={(cause) => setRoomError(cause.message)}
-      className="flex min-h-screen flex-col items-center justify-center bg-slate-900 p-8 text-white"
+      onError={() => setRoomError('Unable to connect with the interviewer.')}
+      className="w-full min-w-0 max-w-full overflow-x-hidden bg-slate-50 text-slate-900"
     >
       <AudioChamber sessionId={sessionId} />
       <RoomAudioRenderer />
@@ -137,16 +146,31 @@ function InterviewRoomContent({ params }: { params: Promise<{ sessionId: string 
 function AudioChamber({ sessionId }: { sessionId: string }) {
   const { state, audioTrack } = useVoiceAssistant();
   const room = useRoomContext();
+  const isCandidateSpeaking = useIsSpeaking(room.localParticipant);
+  const microphoneTracks = useTracks([Track.Source.Microphone]);
+  const candidateMicrophone = microphoneTracks.find(
+    (track) => track.participant.identity === room.localParticipant.identity,
+  );
+  const { segments: candidateTranscription } = useTrackTranscription(candidateMicrophone);
   const router = useRouter();
-  const [transcripts, setTranscripts] = useState<{ speaker: string; text: string }[]>([]);
+  const [transcripts, setTranscripts] = useState<
+    { speaker: string; text: string; timestamp?: string }[]
+  >([]);
   const [transcriptError, setTranscriptError] = useState('');
   const [ending, setEnding] = useState(false);
   const [leaving, setLeaving] = useState(false);
   const [endError, setEndError] = useState('');
   const [leaveError, setLeaveError] = useState('');
+  const [audioEnabled, setAudioEnabled] = useState(false);
+  const [audioError, setAudioError] = useState('');
   const [sessionStatus, setSessionStatus] = useState<SessionStatus | null>(null);
   const [statusError, setStatusError] = useState('');
   const [now, setNow] = useState(() => Date.now());
+  const autoEndStarted = useRef(false);
+  const autoLeaveStarted = useRef(false);
+  const agentConfirmedExit = useRef(false);
+  const firstTranscriptRequestAt = useRef(Date.now());
+  const conversationEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -165,8 +189,8 @@ function AudioChamber({ sessionId }: { sessionId: string }) {
           result === null ||
           !('startedAt' in result) ||
           !(typeof result.startedAt === 'number' || result.startedAt === null) ||
-          !('minimumDurationSeconds' in result) ||
-          typeof result.minimumDurationSeconds !== 'number' ||
+          !('maximumDurationSeconds' in result) ||
+          typeof result.maximumDurationSeconds !== 'number' ||
           !('elapsedSeconds' in result) ||
           typeof result.elapsedSeconds !== 'number'
         ) {
@@ -175,7 +199,7 @@ function AudioChamber({ sessionId }: { sessionId: string }) {
         setSessionStatus({
           startedAt: result.startedAt,
           elapsedSeconds: result.elapsedSeconds,
-          minimumDurationSeconds: result.minimumDurationSeconds,
+          maximumDurationSeconds: result.maximumDurationSeconds,
           sampledAt: Date.now(),
         });
         setStatusError('');
@@ -187,7 +211,7 @@ function AudioChamber({ sessionId }: { sessionId: string }) {
     }
 
     void loadStatus();
-    interval = setInterval(() => void loadStatus(), 5000);
+    interval = setInterval(() => void loadStatus(), 2000);
     return () => {
       controller.abort();
       clearInterval(interval);
@@ -199,16 +223,26 @@ function AudioChamber({ sessionId }: { sessionId: string }) {
     return () => clearInterval(interval);
   }, []);
 
-  const remainingSeconds =
-    sessionStatus?.startedAt === null || sessionStatus === null
-      ? sessionStatus?.minimumDurationSeconds ?? 600
-      : Math.max(
-          0,
-          sessionStatus.minimumDurationSeconds -
-            (sessionStatus.elapsedSeconds +
-              Math.floor((now - sessionStatus.sampledAt) / 1000)),
-        );
-  const canEndInterview = sessionStatus?.startedAt !== null && remainingSeconds === 0;
+  const elapsedSeconds = sessionStatus
+    ? sessionStatus.elapsedSeconds + Math.floor((now - sessionStatus.sampledAt) / 1000)
+    : 0;
+  const hasCandidateAnswer = transcripts.some((entry) => entry.speaker === 'candidate');
+  const latestAnswer = [...transcripts].reverse().find((entry) => entry.speaker === 'candidate');
+  const liveAnswer = candidateTranscription
+    .filter((segment) => !segment.final)
+    .map((segment) => segment.text.trim())
+    .filter(Boolean)
+    .join(' ');
+  const latestAnswerWasAfterMaximum =
+    latestAnswer?.timestamp !== undefined &&
+    sessionStatus?.startedAt !== null &&
+    sessionStatus !== null &&
+    Date.parse(latestAnswer.timestamp) >=
+      (sessionStatus.startedAt + sessionStatus.maximumDurationSeconds) * 1000;
+
+  useEffect(() => {
+    conversationEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }, [transcripts, liveAnswer]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -232,11 +266,22 @@ function AudioChamber({ sessionId }: { sessionId: string }) {
         ) {
           throw new Error('The interview transcript response was invalid.');
         }
+        const hasOpeningQuestion = result.transcripts.some(
+          (entry) =>
+            typeof entry === 'object' &&
+            entry !== null &&
+            'speaker' in entry &&
+            entry.speaker === 'interviewer',
+        );
+        if (!hasOpeningQuestion && Date.now() - firstTranscriptRequestAt.current >= 45_000) {
+          setTranscriptError('Unable to connect with the interviewer.');
+          return;
+        }
         setTranscripts(result.transcripts);
         setTranscriptError('');
-      } catch (cause) {
+      } catch {
         if (!controller.signal.aborted) {
-          setTranscriptError(cause instanceof Error ? cause.message : 'Unable to load interview transcript.');
+          setTranscriptError('Unable to connect with the interviewer.');
         }
       }
     }
@@ -250,9 +295,9 @@ function AudioChamber({ sessionId }: { sessionId: string }) {
     };
   }, [sessionId]);
 
-  async function endInterview() {
-    if (!canEndInterview) {
-      setEndError('The interview needs to run for at least 10 minutes before it can end.');
+  async function endInterview(automatic = false) {
+    if (!automatic && !hasCandidateAnswer) {
+      setEndError('Share an answer with the interviewer before finishing.');
       return;
     }
     setEnding(true);
@@ -262,7 +307,7 @@ function AudioChamber({ sessionId }: { sessionId: string }) {
       const response = await fetch('/api/end-session', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId }),
+        body: JSON.stringify({ sessionId, automatic }),
       });
       if (!response.ok) {
         const result: unknown = await response.json();
@@ -276,6 +321,19 @@ function AudioChamber({ sessionId }: { sessionId: string }) {
         throw new Error(message);
       }
 
+      const result: unknown = await response.json();
+      if (
+        automatic &&
+        typeof result === 'object' &&
+        result !== null &&
+        'status' in result &&
+        result.status === 'not_completed'
+      ) {
+        await room.disconnect();
+        router.replace('/history');
+        return;
+      }
+
       await room.disconnect();
       router.replace(`/scorecard/${encodeURIComponent(sessionId)}`);
     } catch (cause) {
@@ -286,6 +344,7 @@ function AudioChamber({ sessionId }: { sessionId: string }) {
 
   async function leaveInterview() {
     if (
+      !agentConfirmedExit.current &&
       !window.confirm(
         'Leave this interview? It will be marked Not completed, will not receive a scorecard, and cannot be restarted.',
       )
@@ -293,6 +352,7 @@ function AudioChamber({ sessionId }: { sessionId: string }) {
       return;
     }
 
+    agentConfirmedExit.current = false;
     setLeaving(true);
     setLeaveError('');
     try {
@@ -321,107 +381,195 @@ function AudioChamber({ sessionId }: { sessionId: string }) {
     }
   }
 
+  async function enableInterviewerAudio() {
+    try {
+      await room.startAudio();
+      setAudioEnabled(true);
+      setAudioError('');
+    } catch {
+      setAudioError('Unable to enable interviewer audio. Check your device volume and try again.');
+    }
+  }
+
+  useEffect(() => {
+    const durationReached =
+      sessionStatus !== null &&
+      sessionStatus.startedAt !== null &&
+      elapsedSeconds >= sessionStatus.maximumDurationSeconds;
+    if (
+      durationReached &&
+      latestAnswerWasAfterMaximum &&
+      !isCandidateSpeaking &&
+      state === 'listening' &&
+      !autoEndStarted.current &&
+      !ending &&
+      !leaving &&
+      !statusError
+    ) {
+      autoEndStarted.current = true;
+      void endInterview(true);
+    }
+  }, [
+    elapsedSeconds,
+    ending,
+    isCandidateSpeaking,
+    latestAnswerWasAfterMaximum,
+    leaving,
+    sessionStatus,
+    state,
+    statusError,
+  ]);
+
+  useEffect(() => {
+    const interviewerClosedInterview = transcripts.some(
+      (entry) =>
+        entry.speaker === 'interviewer' &&
+        entry.text.toLowerCase().includes(INTERVIEW_EXIT_CONFIRMATION),
+    );
+    if (
+      interviewerClosedInterview &&
+      state === 'listening' &&
+      !isCandidateSpeaking &&
+      !autoLeaveStarted.current &&
+      !ending &&
+      !leaving
+    ) {
+      autoLeaveStarted.current = true;
+      agentConfirmedExit.current = true;
+      void leaveInterview();
+    }
+  }, [ending, isCandidateSpeaking, leaving, state, transcripts]);
+
+  const stateLabel =
+    state === 'speaking'
+      ? 'Interviewer speaking'
+      : state === 'thinking'
+        ? 'Preparing your next question'
+        : state === 'listening'
+          ? 'Listening to you'
+          : 'Connecting with interviewer…';
+
   return (
-    <div className="flex w-full max-w-xl flex-col items-center space-y-8">
-      <div className="space-y-2 text-center">
-        <span className="rounded-full bg-blue-500/20 px-3 py-1 text-sm font-medium uppercase tracking-wider text-blue-400">
-          {state}
-        </span>
-        <h2 className="text-2xl font-semibold">AI Technical Interviewer</h2>
-      </div>
-
-      <div className="flex h-32 w-full items-center justify-center rounded-xl bg-slate-800 p-4">
-        <BarVisualizer
-          state={state}
-          barCount={15}
-          trackRef={audioTrack}
-          className="h-full w-full"
-        />
-      </div>
-
-      <div className="w-full rounded-xl border border-slate-700 bg-slate-800/80 px-5 py-4 text-center">
-        {statusError ? (
-          <p role="alert" className="text-sm text-red-300">{statusError}</p>
-        ) : !sessionStatus?.startedAt ? (
-          <p className="text-sm text-slate-300">Starting your 10-minute interview timer…</p>
-        ) : remainingSeconds > 0 ? (
-          <>
-            <p className="text-sm font-medium text-slate-200">Minimum interview time remaining</p>
-            <p className="mt-1 font-mono text-2xl font-semibold tabular-nums text-white">
-              {String(Math.floor(remainingSeconds / 60)).padStart(2, '0')}:{String(remainingSeconds % 60).padStart(2, '0')}
-            </p>
-            <p className="mt-1 text-xs text-slate-400">Your interviewer will continue with tailored follow-up questions.</p>
-          </>
-        ) : (
-          <p className="text-sm font-medium text-emerald-300">10-minute minimum reached. You can finish when you’re ready.</p>
-        )}
-      </div>
-
-      <div
-        aria-live="polite"
-        aria-relevant="additions text"
-        className="max-h-72 w-full space-y-4 overflow-y-auto rounded-xl bg-slate-800 p-5"
-      >
-        <h3 className="font-semibold text-slate-100">Live interview</h3>
-        {transcriptError ? (
-          <p role="alert" className="text-sm text-red-300">{transcriptError}</p>
-        ) : transcripts.length === 0 ? (
-          <p className="text-sm text-slate-300">
-            Waiting for the AI interviewer to start. If no question appears shortly, check the backend worker logs.
+    <main className="mx-auto grid w-full min-w-0 max-w-[1600px] grid-cols-1 gap-6 overflow-x-hidden px-4 py-4 sm:px-8 lg:h-[calc(100dvh-4rem)] lg:min-h-0 lg:grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)] lg:gap-6 lg:px-8 lg:py-4">
+      <section className="flex min-h-[520px] min-w-0 flex-col justify-between rounded-3xl bg-gradient-to-br from-slate-950 via-slate-900 to-indigo-950 p-6 text-white shadow-xl sm:p-8 lg:min-h-0 lg:p-6">
+        <div className="space-y-3">
+          <span className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/10 px-4 py-2 text-sm font-medium text-indigo-100">
+            <span className={`size-2 rounded-full ${state === 'speaking' ? 'animate-pulse bg-emerald-400' : 'bg-indigo-300'}`} />
+            {stateLabel}
+          </span>
+          <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">AI Technical Interviewer</h1>
+          <p className="max-w-2xl text-sm leading-6 text-slate-300 sm:text-base">
+            Take your time to answer. Your interviewer is listening.
           </p>
-        ) : (
-          transcripts.map((entry, index) => (
-            <p
-              key={`${index}-${entry.speaker}`}
-              className={entry.speaker === 'interviewer' ? 'text-blue-200' : 'text-slate-200'}
-            >
-              <span className="mr-2 font-semibold">
-                {entry.speaker === 'interviewer' ? 'Interviewer:' : 'You:'}
-              </span>
-              {entry.text}
-            </p>
-          ))
-        )}
-      </div>
+        </div>
 
-      <div className="flex flex-wrap items-center justify-center gap-4">
-        <TrackToggle
-          source={Track.Source.Microphone}
-          disabled={ending || leaving}
-          className="rounded-md bg-slate-700 px-5 py-2 font-medium text-white transition-colors hover:bg-slate-600"
-        >
-          Toggle microphone
-        </TrackToggle>
-        <button
-          type="button"
-          onClick={() => void endInterview()}
-          disabled={ending || leaving || !canEndInterview || Boolean(statusError)}
-          className="rounded-md bg-red-600 px-6 py-2 font-medium text-white transition-colors hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {ending ? 'Generating scorecard…' : remainingSeconds > 0 ? 'Finish available after 10 minutes' : 'End interview & view scorecard'}
-        </button>
-        <button
-          type="button"
-          onClick={() => void leaveInterview()}
-          disabled={ending || leaving}
-          className="rounded-md border border-slate-500 px-5 py-2 font-medium text-slate-200 transition-colors hover:border-red-400 hover:bg-red-950/40 hover:text-red-200 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {leaving ? 'Leaving interview…' : 'Leave interview'}
-        </button>
-      </div>
-      <p className="text-center text-xs text-slate-400">
-        Leaving marks this interview Not completed. It cannot be restarted and won’t have a scorecard.
-      </p>
-      {endError && (
-        <p role="alert" className="text-center text-sm text-red-300">
-          {endError}
-        </p>
-      )}
-      {leaveError && (
-        <p role="alert" className="text-center text-sm text-red-300">
-          {leaveError}
-        </p>
-      )}
-    </div>
+        <div className="mx-auto flex size-40 shrink-0 items-center justify-center rounded-full border border-indigo-300/20 bg-indigo-400/10 shadow-[0_0_100px_rgba(99,102,241,0.18)] sm:size-44 lg:size-40">
+          <div className="flex size-28 items-center justify-center rounded-full bg-gradient-to-br from-indigo-500 to-violet-600 shadow-lg sm:size-32">
+            <span className="text-5xl font-semibold text-white" aria-hidden="true">IA</span>
+          </div>
+        </div>
+
+        <div className="min-w-0 rounded-2xl border border-white/10 bg-white/5 p-4 sm:p-5">
+          <p className="mb-4 text-center text-sm font-medium text-slate-300">Live audio</p>
+          <div className="h-16 w-full min-w-0">
+            <BarVisualizer state={state} barCount={36} trackRef={audioTrack} className="h-full w-full" />
+          </div>
+        </div>
+      </section>
+
+      <aside className="flex min-h-[520px] min-w-0 flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white p-5 shadow-sm sm:p-8 lg:min-h-0 lg:p-6">
+        <div className="shrink-0 border-b border-slate-100 pb-5">
+          <p className="text-sm font-semibold uppercase tracking-wider text-indigo-600">Live conversation</p>
+          <h2 className="mt-1 text-2xl font-semibold tracking-tight text-slate-900">Your interview</h2>
+          <p className="mt-2 text-sm text-slate-500">Your full conversation appears here.</p>
+        </div>
+
+        {transcriptError ? (
+          <div role="alert" className="my-auto rounded-2xl bg-rose-50 p-5 text-center text-sm font-medium text-rose-700">
+            Unable to connect with the interviewer.
+          </div>
+        ) : transcripts.length > 0 || liveAnswer ? (
+          <div
+            aria-live="polite"
+            aria-relevant="additions text"
+            className="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain py-5 pr-1"
+          >
+            {transcripts.map((entry, index) => (
+              <article
+                key={`${entry.speaker}-${index}`}
+                className={`max-w-[92%] break-words rounded-2xl p-4 ${
+                  entry.speaker === 'candidate'
+                    ? 'ml-auto rounded-tr-md bg-slate-100 text-slate-700'
+                    : 'mr-auto rounded-tl-md bg-indigo-50 text-slate-800'
+                }`}
+              >
+                <p
+                  className={`mb-1 text-xs font-bold uppercase tracking-wider ${
+                    entry.speaker === 'candidate' ? 'text-slate-500' : 'text-indigo-600'
+                  }`}
+                >
+                  {entry.speaker === 'candidate' ? 'You' : 'Interviewer'}
+                </p>
+                <p className="text-sm leading-6 sm:text-base">{entry.text}</p>
+              </article>
+            ))}
+            {liveAnswer && (
+              <article className="ml-auto max-w-[92%] break-words rounded-2xl rounded-tr-md border border-indigo-100 bg-slate-100 p-4 text-slate-700">
+                <p className="mb-1 text-xs font-bold uppercase tracking-wider text-slate-500">You are saying</p>
+                <p className="text-sm leading-6 sm:text-base">{liveAnswer}</p>
+              </article>
+            )}
+            <div ref={conversationEndRef} />
+          </div>
+        ) : (
+          <div role="status" className="my-auto rounded-2xl bg-slate-50 p-8 text-center">
+            <div className="mx-auto mb-4 size-9 animate-spin rounded-full border-2 border-indigo-200 border-t-indigo-600" />
+            <p className="font-medium text-slate-800">Connecting with interviewer…</p>
+            <p className="mt-2 text-sm text-slate-500">Your first question will appear here.</p>
+          </div>
+        )}
+
+        <div className="mt-auto shrink-0 space-y-4 border-t border-slate-100 pt-5">
+          {!audioEnabled && (
+            <button
+              type="button"
+              onClick={() => void enableInterviewerAudio()}
+              className="inline-flex min-h-11 w-full items-center justify-center gap-2 rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-2.5 text-sm font-semibold text-indigo-700 transition hover:bg-indigo-100"
+            >
+              <Volume2 size={18} aria-hidden="true" />
+              Enable interviewer audio
+            </button>
+          )}
+          {audioError && <p role="alert" className="text-center text-sm text-rose-700">{audioError}</p>}
+          <div className="flex flex-col gap-3 sm:flex-row">
+            <TrackToggle
+              source={Track.Source.Microphone}
+              disabled={ending || leaving}
+              className="inline-flex min-h-12 flex-1 items-center justify-center rounded-xl border border-slate-300 bg-white px-5 py-3 font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Toggle microphone
+            </TrackToggle>
+            <button
+              type="button"
+              onClick={() => void endInterview()}
+              disabled={ending || leaving || !hasCandidateAnswer}
+              className="min-h-12 flex-1 rounded-xl bg-indigo-600 px-5 py-3 font-semibold text-white transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {ending ? 'Preparing your scorecard…' : 'Finish interview'}
+            </button>
+          </div>
+          <button
+            type="button"
+            onClick={() => void leaveInterview()}
+            disabled={ending || leaving}
+            className="w-full rounded-xl px-4 py-2.5 text-sm font-medium text-slate-500 transition hover:bg-rose-50 hover:text-rose-700 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {leaving ? 'Leaving interview…' : 'Leave interview'}
+          </button>
+          {endError && <p role="alert" className="text-center text-sm text-rose-700">{endError}</p>}
+          {leaveError && <p role="alert" className="text-center text-sm text-rose-700">{leaveError}</p>}
+        </div>
+      </aside>
+    </main>
   );
 }

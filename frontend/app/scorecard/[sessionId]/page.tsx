@@ -18,6 +18,12 @@ type ScorecardResponse = {
   evidence_quotes_json?: unknown;
 };
 
+type TranscriptEntry = {
+  speaker: 'interviewer' | 'candidate';
+  text: string;
+  timestamp?: string;
+};
+
 function parseStringArray(value: unknown, field: string): string[] {
   if (typeof value !== 'string') {
     throw new Error(`The scorecard is missing ${field}.`);
@@ -78,8 +84,57 @@ export default function ScorecardPage({ params }: { params: Promise<{ sessionId:
 function ScorecardContent({ params }: { params: Promise<{ sessionId: string }> }) {
   const { sessionId } = use(params);
   const [data, setData] = useState<Scorecard | null>(null);
+  const [transcripts, setTranscripts] = useState<TranscriptEntry[]>([]);
+  const [transcriptError, setTranscriptError] = useState('');
   const [error, setError] = useState('');
   const [waiting, setWaiting] = useState(true);
+
+  useEffect(() => {
+    const controller = new AbortController();
+
+    async function loadTranscript() {
+      try {
+        const query = new URLSearchParams({ sessionId });
+        const response = await fetch(`/api/transcript?${query.toString()}`, {
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          throw new Error('Unable to load this interview conversation.');
+        }
+
+        const result: unknown = await response.json();
+        if (
+          typeof result !== 'object' ||
+          result === null ||
+          !('transcripts' in result) ||
+          !Array.isArray(result.transcripts)
+        ) {
+          throw new Error('The interview conversation response was invalid.');
+        }
+
+        const entries = result.transcripts.filter(
+          (entry): entry is TranscriptEntry =>
+            typeof entry === 'object' &&
+            entry !== null &&
+            'speaker' in entry &&
+            (entry.speaker === 'interviewer' || entry.speaker === 'candidate') &&
+            'text' in entry &&
+            typeof entry.text === 'string',
+        );
+        setTranscripts(entries);
+        setTranscriptError('');
+      } catch (cause) {
+        if (!controller.signal.aborted) {
+          setTranscriptError(
+            cause instanceof Error ? cause.message : 'Unable to load this interview conversation.',
+          );
+        }
+      }
+    }
+
+    void loadTranscript();
+    return () => controller.abort();
+  }, [sessionId]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -222,6 +277,61 @@ function ScorecardContent({ params }: { params: Promise<{ sessionId: string }> }
           ))}
         </div>
       </section>
+
+      <details open className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+        <summary className="cursor-pointer px-5 py-4 font-semibold text-slate-900 marker:text-indigo-600">
+          Full interview conversation
+          {!transcriptError && (
+            <span className="ml-2 text-sm font-normal text-slate-500">
+              {transcripts.length} messages
+            </span>
+          )}
+        </summary>
+        <div className="max-h-[70vh] space-y-4 overflow-y-auto border-t border-slate-100 bg-slate-50 p-4 sm:p-6">
+          {transcriptError ? (
+            <p role="alert" className="rounded-lg bg-rose-50 p-4 text-sm text-rose-700">
+              {transcriptError}
+            </p>
+          ) : transcripts.length === 0 ? (
+            <p className="text-sm text-slate-500">No conversation was recorded for this interview.</p>
+          ) : (
+            transcripts.map((entry, index) => (
+              <article
+                key={`${entry.speaker}-${index}`}
+                className={`max-w-[92%] break-words rounded-2xl p-4 ${
+                  entry.speaker === 'candidate'
+                    ? 'ml-auto rounded-tr-md bg-indigo-600 text-white'
+                    : 'mr-auto rounded-tl-md border border-slate-200 bg-white text-slate-800'
+                }`}
+              >
+                <div className="mb-1 flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
+                  <p
+                    className={`text-xs font-bold uppercase tracking-wider ${
+                      entry.speaker === 'candidate' ? 'text-indigo-100' : 'text-indigo-700'
+                    }`}
+                  >
+                    {entry.speaker === 'candidate' ? 'You' : 'Interviewer'}
+                  </p>
+                  {entry.timestamp && (
+                    <time
+                      className={`text-xs ${
+                        entry.speaker === 'candidate' ? 'text-indigo-100' : 'text-slate-400'
+                      }`}
+                      dateTime={entry.timestamp}
+                    >
+                      {new Date(entry.timestamp).toLocaleTimeString(undefined, {
+                        hour: 'numeric',
+                        minute: '2-digit',
+                      })}
+                    </time>
+                  )}
+                </div>
+                <p className="whitespace-pre-wrap text-sm leading-6 sm:text-base">{entry.text}</p>
+              </article>
+            ))
+          )}
+        </div>
+      </details>
     </main>
   );
 }

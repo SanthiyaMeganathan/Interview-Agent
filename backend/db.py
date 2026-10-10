@@ -24,7 +24,7 @@ from sqlalchemy.engine import Engine, URL, make_url
 
 load_dotenv(dotenv_path=Path(__file__).with_name(".env"))
 
-MIN_INTERVIEW_SECONDS = 10 * 60
+MAX_INTERVIEW_SECONDS = 10 * 60
 DB_PATH = Path(__file__).with_name("interview_app.db")
 
 database_url = os.environ.get("DATABASE_URL")

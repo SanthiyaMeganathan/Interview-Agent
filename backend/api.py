@@ -14,7 +14,7 @@ from livekit.api import AccessToken, VideoGrants
 from pypdf import PdfReader
 
 from db import (
-    MIN_INTERVIEW_SECONDS,
+    MAX_INTERVIEW_SECONDS,
     create_session,
     delete_scorecard,
     get_scorecard,
@@ -71,17 +71,16 @@ class ApiHandler(BaseHTTPRequestHandler):
                     self._send_json(409, {"error": "This interview is not active and cannot be completed."})
                     return
 
-                remaining = max(
-                    0,
-                    MIN_INTERVIEW_SECONDS - int(time.time() - session["started_at"]),
+                automatic = payload.get("automatic") is True
+                elapsed = (
+                    max(0, int(time.time() - session["started_at"]))
+                    if session["started_at"] is not None
+                    else 0
                 )
-                if remaining:
+                if automatic and elapsed < MAX_INTERVIEW_SECONDS:
                     self._send_json(
                         409,
-                        {
-                            "error": "The interview needs to run for at least 10 minutes before it can end.",
-                            "remainingSeconds": remaining,
-                        },
+                        {"error": "The interview is still in progress."},
                     )
                     return
 
@@ -89,6 +88,11 @@ class ApiHandler(BaseHTTPRequestHandler):
                 if not scorecard:
                     transcripts = get_transcripts(session_id)
                     if not any(item["speaker"] == "candidate" for item in transcripts):
+                        if automatic and elapsed >= MAX_INTERVIEW_SECONDS:
+                            mark_session_not_completed(session_id, time.time())
+                            delete_scorecard(session_id)
+                            self._send_json(200, {"status": "not_completed"})
+                            return
                         self._send_json(409, {"error": "No candidate answers were recorded for this interview."})
                         return
 
@@ -169,7 +173,7 @@ class ApiHandler(BaseHTTPRequestHandler):
         except Exception:
             if request_path == "/api/end-session":
                 self.log_error("Failed to generate interview scorecard")
-                self._send_json(502, {"error": "Unable to generate the interview scorecard. Check the backend logs and try again."})
+                self._send_json(502, {"error": "Unable to generate your interview scorecard. Please try again."})
             elif request_path == "/api/leave-session":
                 self.log_error("Failed to mark interview as not completed")
                 self._send_json(500, {"error": "Unable to leave the interview. Please try again."})
@@ -203,9 +207,8 @@ class ApiHandler(BaseHTTPRequestHandler):
                 {
                     "startedAt": started_at,
                     "elapsedSeconds": elapsed,
-                    "minimumDurationSeconds": MIN_INTERVIEW_SECONDS,
-                    "remainingSeconds": max(0, MIN_INTERVIEW_SECONDS - elapsed),
-                    "status": session["status"],
+                "maximumDurationSeconds": MAX_INTERVIEW_SECONDS,
+                "status": session["status"],
                 },
             )
             return

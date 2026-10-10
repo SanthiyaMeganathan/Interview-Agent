@@ -51,20 +51,30 @@ export default function NewInterviewPage() {
         }),
       });
 
-      const result: unknown = await response.json();
+      let result: unknown = null;
+      try {
+        result = await response.json();
+      } catch {
+        // Proxies can return a plain-text error when the API is unavailable.
+      }
       if (!response.ok) {
         const message =
           typeof result === 'object' && result !== null && 'error' in result && typeof result.error === 'string'
             ? result.error
-            : `Interview setup failed (HTTP ${response.status}). Please try again.`;
+            : 'Unable to start your interview right now. Please try again.';
         throw new Error(message);
       }
       if (typeof result !== 'object' || result === null || !('sessionId' in result) || typeof result.sessionId !== 'string') {
-        throw new Error('Interview setup returned an invalid response.');
+        throw new Error('Unable to start your interview right now. Please try again.');
       }
       router.push(`/interview/${encodeURIComponent(result.sessionId)}`);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Unable to start the interview.');
+      const message = cause instanceof Error ? cause.message : '';
+      setError(
+        message === 'Failed to fetch'
+          ? 'Unable to connect to the interview service. Please try again.'
+          : message || 'Unable to start your interview right now. Please try again.',
+      );
     } finally {
       setLoading(false);
     }
@@ -148,7 +158,7 @@ export default function NewInterviewPage() {
         >
           {loading ? 'Preparing your interview…' : 'Start interview'}
         </button>
-        <p className="text-center text-xs text-slate-500">Interviews last at least 10 minutes before you can finish.</p>
+        <p className="text-center text-xs text-slate-500">Your interviewer will guide the conversation based on your experience.</p>
       </div>
     </main>
   );

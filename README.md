@@ -1,17 +1,8 @@
----
-title: Interview Agent
-emoji: 🎙️
-colorFrom: indigo
-colorTo: blue
-sdk: docker
-app_port: 7860
----
-
 # Interview Agent
 
 Interview Agent is a local practice app for technical interviews. Candidates upload a PDF resume, provide a target job description, and have a voice conversation with an AI interviewer. A completed interview produces a scorecard with competency scores, strengths, risks, and evidence quotes.
 
-The app consists of a Next.js frontend, a Python HTTP API, a SQLite database, and a separate LiveKit voice-agent worker. The frontend and backend need to be running together for an interview to work.
+The app consists of a Next.js frontend, a Python HTTP API, a SQLAlchemy-backed database (local SQLite or hosted PostgreSQL), and a separate LiveKit voice-agent worker. The frontend and backend need to be running together for an interview to work.
 
 ## Features
 
@@ -19,7 +10,7 @@ The app consists of a Next.js frontend, a Python HTTP API, a SQLite database, an
 - Resume upload as a PDF, with text extraction on the backend.
 - Real-time voice interview using LiveKit, Deepgram speech-to-text, and Cartesia text-to-speech.
 - Interview questions tailored to the resume and job description, with follow-ups and technical deep dives.
-- Ten-minute minimum before an interview can be completed normally. The backend enforces this limit.
+- Interviews can be completed after any recorded answer, with a maximum duration of ten minutes.
 - A candidate can leave early. A left or disconnected interview is marked **Not completed**, cannot be restarted, and has no scorecard.
 - Past interviews exclude sessions that were created but never started. The dashboard shows up to three recent completed interviews.
 
@@ -30,12 +21,12 @@ The frontend and backend are separate folders under the project root. Run comman
 ```text
 Interview Agent/
 ├── README.md
-├── Dockerfile                 # Hugging Face Docker Space for the backend
+├── Dockerfile                 # Docker image for the Render backend service
 ├── .dockerignore
 ├── backend/
 │   ├── .env.example
 │   ├── .dockerignore
-│   ├── Dockerfile              # Use when deploying backend/ as a separate Space
+│   ├── Dockerfile              # Alternative when building with backend/ as Docker context
 │   ├── start.sh
 │   ├── agent.py                 # LiveKit voice worker
 │   ├── api.py                   # Python HTTP API
@@ -135,23 +126,47 @@ npm run dev
 
 Open [http://localhost:3000](http://localhost:3000). To interview, allow microphone access and enable interviewer audio if the browser blocks autoplay.
 
-## Deploy the backend to Hugging Face Spaces
+## Deploy to Vercel, Render, and Supabase
 
-The repository-root `Dockerfile` builds the Python API and LiveKit worker as a Docker Space on port `7860`. The Next.js frontend is not served by that container; host it separately (for example, on Vercel) and point its `BACKEND_API_URL` environment variable at the public URL of the backend Space.
+The production deployment uses three services:
 
-1. Create a Hugging Face Space and select **Docker**.
-2. Connect this repository as the Space source. Keep the repository-root `Dockerfile`, `.dockerignore`, and this README with the Space so the Docker SDK and exposed port are recognized.
-3. In the Space **Settings → Variables and secrets**, add these runtime secrets:
-   - `DATABASE_URL` — Supabase PostgreSQL **session pooler** URI from the project's **Connect** dialog.
+- **Vercel** hosts the Next.js app in `frontend/`.
+- **Render** runs the backend Docker container, including both the Python API and the LiveKit worker.
+- **Supabase** hosts PostgreSQL.
+
+### 1. Configure Supabase PostgreSQL
+
+1. Open the Supabase project dashboard and select **Connect**.
+2. Copy the PostgreSQL **session pooler** connection URI. The session pooler is suitable for Render instances that may not have IPv6 connectivity.
+3. URL-encode reserved characters in the database password. Rotate any database password that has been shared outside the Supabase dashboard.
+4. Keep the connection URI private; configure it as a Render secret, not in source code or a Vercel environment variable.
+
+The backend creates and migrates the required tables on startup. This does **not** copy existing records from local `backend/interview_app.db`; local sessions and cloud sessions remain separate unless migrated explicitly.
+
+### 2. Deploy the backend Docker service on Render
+
+Create a **Web Service** in Render and connect the Git repository:
+
+1. Choose **Docker** as the runtime.
+2. Set the Docker context/root directory to the repository root (`.`) and use the repository-root `Dockerfile`.
+3. Add these environment variables under the Render service settings. Mark credentials and the database URI as secret:
+   - `DATABASE_URL` — the Supabase PostgreSQL session-pooler URI.
    - `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`
    - `GROQ_API_KEY`, `DEEPGRAM_API_KEY`, `CARTESIA_API_KEY`
-4. Wait for the Docker Space to build and start. The container requires `DATABASE_URL`; it deliberately fails to start rather than silently using ephemeral SQLite storage.
-5. Check the backend Space URL or `/health`; a running API responds with `{"status":"ok"}`.
-6. Deploy the Next.js `frontend/` app separately and set `BACKEND_API_URL` to the backend Space's HTTPS URL (without an `/api` suffix). Next.js rewrites `/api/*` requests to that backend URL.
+   - `REQUIRE_DATABASE_URL=1`
+4. Set the Render health-check path to `/health`.
+5. Deploy and wait for the service to become healthy. The API listens on Render's `PORT`; the same container also starts the LiveKit worker.
 
-The backend initializes its PostgreSQL schema automatically. This does **not** copy existing records from local `backend/interview_app.db`; local sessions and cloud sessions remain separate unless you explicitly migrate data. Treat resumes and transcripts as sensitive data and restrict access to both the app and the database.
+The LiveKit worker must remain connected so it can accept dispatched interview rooms. Use a Render plan that keeps this service running; a service that sleeps or suspends will make voice interviews unavailable. The repository-root `Dockerfile` is intended for a repository-root Docker context. `backend/Dockerfile` is an alternative only if configuring Render with `backend/` as its root/build context.
 
-If deploying only the `backend/` directory as its own Docker Space repository instead, use `backend/Dockerfile` and `backend/.dockerignore`.
+### 3. Deploy the frontend on Vercel
+
+1. Import the same Git repository into Vercel.
+2. Set **Root Directory** to `frontend`.
+3. Add the environment variable `BACKEND_API_URL`, set to the public Render service URL (for example, `https://your-service.onrender.com`), with no trailing `/api`.
+4. Deploy the frontend.
+
+`next.config.ts` rewrites frontend `/api/*` requests to `BACKEND_API_URL`. Set this variable in Vercel's build environment so the rewrite points to the Render backend in the deployed app. Do not put Supabase credentials in Vercel; only the backend connects to the database.
 
 ## Application routes
 
@@ -159,22 +174,22 @@ If deploying only the `backend/` directory as its own Docker Space repository in
 | --- | --- |
 | `/` | Dashboard and recent completed interviews |
 | `/interview/new` | Candidate details, resume PDF, and job description |
-| `/interview/[sessionId]` | Live voice interview, transcript, timer, and leave/end controls |
+| `/interview/[sessionId]` | Live voice interview, latest question and response, and leave/end controls |
 | `/history` | Completed and not-completed interview history |
 | `/scorecard/[sessionId]` | Scorecard for a completed interview |
 
 ## Backend API
 
-The frontend calls these routes through the Next.js `/api/*` rewrite. Locally the backend defaults to port `8000`; in the Docker Space it binds to `0.0.0.0:7860`.
+The frontend calls these routes through the Next.js `/api/*` rewrite. Locally the backend defaults to port `8000`; in the Render Docker service it binds to `0.0.0.0` on Render's `PORT`.
 
 | Method | Endpoint | Purpose |
 | --- | --- | --- |
 | `POST` | `/api/start-session` | Validate/extract the resume and create a session |
 | `GET` | `/api/token?room={sessionId}` | Issue a LiveKit token for an eligible session |
-| `GET` | `/api/session-status?sessionId={sessionId}` | Read lifecycle status and elapsed/remaining time |
+| `GET` | `/api/session-status?sessionId={sessionId}` | Read lifecycle status and maximum duration |
 | `GET` | `/api/transcript?sessionId={sessionId}` | Read the interview transcript |
 | `GET` | `/api/sessions` | List started sessions for interview history |
-| `POST` | `/api/end-session` | Check completion requirements and generate the scorecard |
+| `POST` | `/api/end-session` | Complete an interview and generate the scorecard |
 | `POST` | `/api/leave-session` | Permanently mark a session not completed |
 | `GET` | `/api/scorecard?sessionId={sessionId}` | Read a completed session’s scorecard |
 
@@ -184,8 +199,8 @@ The frontend calls these routes through the Next.js `/api/*` rewrite. Locally th
 2. The backend extracts readable text from the PDF and saves the text and job description in SQLite or PostgreSQL, depending on `DATABASE_URL`. The original PDF file is not stored by the backend.
 3. The interview page requests a LiveKit token. When the worker joins the room, it marks the session in progress and starts the timer.
 4. The worker uses Deepgram for speech recognition and Cartesia for speech output. LangGraph and Groq generate resume- and job-related topics, initial questions, follow-ups, and technical deep dives.
-5. On normal completion, the backend checks that at least ten minutes elapsed and that at least one candidate answer exists. It sends the resume, job description, and transcript to the Groq-based evaluator, saves the scorecard, and marks the session completed.
-6. Leaving early or disconnecting marks the session not completed instead. The worker does not create a scorecard on disconnect, and the session cannot be re-entered.
+5. The candidate can finish after any recorded answer; there is no minimum duration. Interviews are capped at ten minutes. At the cap, the app completes the scorecard after the current speaking turn, provided there is at least one candidate answer. It sends the resume, job description, and transcript to the Groq-based evaluator, saves the scorecard, and marks the session completed.
+6. Leaving early or disconnecting marks the session not completed instead. If the candidate says they need to leave, the interviewer asks why, gives a brief spoken closing after the candidate responds, and then ends the room. Unrelated questions are redirected to the interview topic; after three consecutive off-topic turns, the interviewer politely ends the interview. These early endings do not create a scorecard, and the session cannot be re-entered.
 
 The scorecard fields are generated by the language model. The evaluator asks for an overall score, competency scores, strengths, risks, and evidence quotes in JSON. **There is no deterministic weighted scoring formula or human-calibrated rubric**, so scores can vary and should be treated as practice feedback, not an objective hiring decision.
 
@@ -194,7 +209,7 @@ The scorecard fields are generated by the language model. The evaluator asks for
 - Without `DATABASE_URL`, local SQLite data is stored in `backend/interview_app.db`. It contains candidate details, extracted resume text, job descriptions, transcripts, and scorecards. With `DATABASE_URL`, those records are stored in the configured PostgreSQL database. Back up or delete local data deliberately if you need to retain or remove it.
 - This is a local prototype: there are no user accounts, authentication, or per-user access controls.
 - The resume reader supports readable, text-based PDFs only. Scanned/image-only resumes are not OCR-processed. Encrypted PDFs are rejected; PDFs are limited to 8 MB and 100 pages.
-- A ten-minute minimum is required to finish normally; the interview has no fixed maximum duration.
+- There is no minimum interview duration. Candidates can finish after any recorded answer; interviews end automatically at ten minutes after the candidate's final response to the current question. Duration is not shown in the live room.
 - Leaving or disconnecting is final. There is no pause/resume or restart for that session.
 - Voice, question generation, and scorecard evaluation depend on external provider availability and valid credentials.
 - Do not use this prototype to make hiring decisions or upload sensitive data unless you understand how data is processed and stored.
