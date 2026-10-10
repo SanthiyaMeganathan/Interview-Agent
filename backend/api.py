@@ -181,6 +181,10 @@ class ApiHandler(BaseHTTPRequestHandler):
         request = urlparse(self.path)
         query = parse_qs(request.query)
 
+        if request.path in {"/", "/health"}:
+            self._send_json(200, {"status": "ok"})
+            return
+
         if request.path == "/api/sessions":
             sessions = get_sessions()
             self._send_json(200, {"sessions": sessions})
@@ -277,6 +281,8 @@ class ApiHandler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    server = ThreadingHTTPServer(("127.0.0.1", 8000), ApiHandler)
-    print("Interview Agent API listening at http://127.0.0.1:8000", flush=True)
+    host = os.environ.get("HOST", "127.0.0.1")
+    port = int(os.environ.get("PORT", "8000"))
+    server = ThreadingHTTPServer((host, port), ApiHandler)
+    print(f"Interview Agent API listening at http://{host}:{port}", flush=True)
     server.serve_forever()
