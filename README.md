@@ -16,10 +16,11 @@ The app consists of a Next.js frontend, a Python HTTP API, a SQLite database, an
 
 ## Project structure
 
-The Git repository is currently the `frontend` directory. The backend is a sibling directory, so both directories should be present under the same `Interview Agent` folder when running the full application.
+The frontend and backend are separate folders under the project root. Run commands from the folder specified in each command.
 
 ```text
 Interview Agent/
+├── README.md
 ├── backend/
 │   ├── agent.py                 # LiveKit voice worker
 │   ├── api.py                   # Python HTTP API
@@ -28,7 +29,7 @@ Interview Agent/
 │   ├── graph.py                 # Interview questions and flow
 │   ├── requirements.txt
 │   └── .env                     # Local provider credentials (not committed)
-└── frontend/                    # This Git repository
+└── frontend/
     ├── app/
     │   ├── components/
     │   ├── history/
