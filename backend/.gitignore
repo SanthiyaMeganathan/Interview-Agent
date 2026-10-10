@@ -1,0 +1,17 @@
+.env
+
+# Python virtual environments
+venv/
+.venv/
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local interview data
+*.db
+*.sqlite
+*.sqlite3
